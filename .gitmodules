@@ -16,3 +16,6 @@
 [submodule "vendor/Catch2"]
 	path = vendor/Catch2
 	url = https://github.com/catchorg/Catch2.git
+[submodule "vendor/DAGMC"]
+	path = vendor/DAGMC
+	url = https://github.com/svalinn/DAGMC.git
