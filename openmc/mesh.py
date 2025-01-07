@@ -5,6 +5,7 @@ from collections.abc import Iterable, Sequence
 from functools import wraps
 from math import pi, sqrt, atan2
 from numbers import Integral, Real
+from pathlib import Path
 
 import h5py
 import lxml.etree as ET
@@ -2449,6 +2450,112 @@ class UnstructuredMesh(MeshBase):
         writer.SetInputData(grid)
 
         writer.Write()
+
+    def _append_dataset(dset, array):
+        origLen = dset.shape[0]
+        dset.resize(origLen + array.shape[0], axis=0)
+        dset[origLen:] = array
+
+    def write_data_to_vtk_hdf(
+        self,
+        filename: PathLike | None = None,
+        datasets: dict | None = None,
+        volume_normalization: bool = True,
+    ):
+        """Write data to file to unstructured VTKHDF file.
+
+        Viewable in Paraview version 0.13.0 and above.
+
+        Parameters
+        ----------
+        filename : str or pathlib.Path
+            Name of the HDF file to write, should have .hdf suffix for Paraview compatibility
+        datasets : dict
+            Dictionary whose keys are the data labels
+            and values are numpy appropriately sized arrays
+            of the data
+        volume_normalization : bool
+            Whether or not to normalize the data by the
+            volume of the mesh elements
+        """
+
+        if self.library != "moab":
+            raise NotImplemented("VTKHDF output is only supported for MOAB meshes")
+        if Path(filename).suffix != ".hdf":
+            raise ValueError(
+                "VTKHDF output requires a file with a .hdf suffix for Paraview to recognise the file format automatically"
+            )
+
+        trimmed_connectivity = []
+        for cell in self.connectivity:
+            # Find the index of the first -1 value, if any
+            first_negative_index = np.where(cell == -1)[0]
+            if first_negative_index.size > 0:
+                # Slice the array up to the first -1 value
+                trimmed_connectivity.append(cell[: first_negative_index[0]])
+            else:
+                # No -1 values, append the whole cell
+                trimmed_connectivity.append(cell)
+
+        trimmed_connectivity = np.array(trimmed_connectivity, dtype="int32").flatten()
+
+        points_per_cell = 4
+
+        offsets = np.arange(0, self.n_elements * points_per_cell + 1, points_per_cell)
+
+        with h5py.File(filename, "w") as f:
+
+            root = f.create_group("VTKHDF")
+            root.attrs["Version"] = (2, 1)
+            ascii_type = "UnstructuredGrid".encode("ascii")
+            root.attrs.create(
+                "Type", ascii_type, dtype=h5py.string_dtype("ascii", len(ascii_type))
+            )
+
+            root.create_dataset("NumberOfPoints", (0,), maxshape=(None,), dtype="i8")
+            root.create_dataset("Types", (0,), maxshape=(None,), dtype="uint8")
+            root.create_dataset("Points", (0, 3), maxshape=(None, 3), dtype="f")
+            root.create_dataset(
+                "NumberOfConnectivityIds", (0,), maxshape=(None,), dtype="i8"
+            )
+            root.create_dataset("NumberOfCells", (0,), maxshape=(None,), dtype="i8")
+            root.create_dataset("Offsets", (0,), maxshape=(None,), dtype="i8")
+            root.create_dataset("Connectivity", (0,), maxshape=(None,), dtype="i8")
+
+            self._append_dataset(root["NumberOfPoints"], np.array([len(self.vertices)]))
+            self._append_dataset(root["Points"], self.vertices)
+
+            self._append_dataset(
+                root["NumberOfConnectivityIds"], np.array([len(trimmed_connectivity)])
+            )
+            self._append_dataset(root["Connectivity"], trimmed_connectivity)
+
+            self._append_dataset(root["NumberOfCells"], np.array([self.n_elements]))
+            self._append_dataset(root["Offsets"], offsets)
+
+            types = np.full(
+                self.n_elements, 10, dtype="uint8"
+            )  # VTK_TETRA type assumes DAGMC mesh
+            self._append_dataset(root["Types"], types)
+
+            cell_data_group = root.create_group("CellData")
+
+            for name, data in datasets.items():
+
+                if data.shape != self.dimension:
+                    raise ValueError(
+                        f'Cannot apply dataset "{name}" with '
+                        f"shape {data.shape} to mesh {self.id} "
+                        f"with dimensions {self.dimension}"
+                    )
+
+                cell_data_group.create_dataset(
+                    name, (0,), maxshape=(None,), dtype="float64", chunks=True
+                )
+
+                if volume_normalization:
+                    data /= self.volumes
+                self._append_dataset(cell_data_group[name], data)
 
     @classmethod
     def from_hdf5(cls, group: h5py.Group, mesh_id: int, name: str):
